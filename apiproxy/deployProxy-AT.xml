@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<APIProxy revision="1" name="deployProxy-AT">
+  <DisplayName/>
+  <Description/>
+  <CreatedAt>1776153376419</CreatedAt>
+  <LastModifiedAt>1776153460583</LastModifiedAt>
+  <BasePaths>/deploy</BasePaths>
+  <ProxyEndpoints>
+    <ProxyEndpoint>default</ProxyEndpoint>
+  </ProxyEndpoints>
+  <TargetEndpoints>
+    <TargetEndpoint>default</TargetEndpoint>
+  </TargetEndpoints>
+  <Policies>
+    <Policy>AM-msg</Policy>
+    <Policy>SA-MockSpike</Policy>
+  </Policies>
+</APIProxy>
