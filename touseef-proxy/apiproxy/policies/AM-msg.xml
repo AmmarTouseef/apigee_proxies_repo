@@ -4,7 +4,7 @@
   <Set>
     <Payload content-type="application/json">
       {
-        "message": "This is a message after pipeline setup"
+        "message": "This is a message after pipeline setup 1"
       }
     </Payload>
   </Set>
