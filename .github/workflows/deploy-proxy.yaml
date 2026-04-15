@@ -1,0 +1,148 @@
+name: Apigee CI/CD (Dynamic Proxy Deploy)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**/apiproxy/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      # 📥 Checkout (FIXED for git diff)
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      # 🔍 Detect Proxy Folder (SAFE)
+      - name: Detect Proxy Folder
+        run: |
+          echo "Detecting changed proxy..."
+
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          else
+            echo "⚠️ No previous commit, using all files"
+            CHANGED_FILES=$(git ls-files)
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          PROXY_DIR=$(echo "$CHANGED_FILES" | grep apiproxy | head -1 | cut -d'/' -f1)
+
+          if [ -z "$PROXY_DIR" ]; then
+            echo "❌ No proxy folder detected"
+            exit 1
+          fi
+
+          echo "✅ Proxy detected: $PROXY_DIR"
+          echo "PROXY_DIR=$PROXY_DIR" >> $GITHUB_ENV
+
+      # 🔐 Authenticate to GCP
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # ☁️ Setup gcloud
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # 🔧 Install tools
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip jq
+
+      # 📦 Zip Proxy
+      - name: Zip Apigee Proxy
+        run: |
+          echo "Zipping proxy: $PROXY_DIR"
+          cd $PROXY_DIR
+          zip -r ../proxy.zip apiproxy
+          cd ..
+
+      # 🚀 Import + Deploy
+      - name: Deploy to Apigee
+        run: |
+          echo "Starting deployment for $PROXY_DIR..."
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+
+          # ── IMPORT ─────────────────────────────
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            "https://apigee.googleapis.com/v1/organizations/${{ vars.APIGEE_ORG }}/apis?action=import&name=$PROXY_DIR" \
+            --data-binary "@proxy.zip")
+
+          echo "Import Response:"
+          echo "$RESPONSE"
+
+          IMPORT_ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty')
+          if [ -n "$IMPORT_ERROR" ]; then
+            echo "❌ Import failed: $IMPORT_ERROR"
+            exit 1
+          fi
+
+          REVISION=$(echo "$RESPONSE" | jq -r '.revision')
+          if [ -z "$REVISION" ] || [ "$REVISION" = "null" ]; then
+            echo "❌ Failed to get revision"
+            exit 1
+          fi
+
+          echo "✅ Imported Revision: $REVISION"
+
+          # ── UNDEPLOY OLD REVISIONS (FIXED) ─────
+          echo "Checking existing deployments..."
+
+          DEPLOYED=$(curl -s \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "https://apigee.googleapis.com/v1/organizations/${{ vars.APIGEE_ORG }}/environments/${{ vars.APIGEE_ENV }}/apis/$PROXY_DIR/deployments")
+
+          echo "$DEPLOYED"
+
+          OLD_REVS=$(echo "$DEPLOYED" | jq -r '.deployments[]?.revision')
+
+          if [ -z "$OLD_REVS" ]; then
+            echo "No existing deployments found"
+          else
+            for OLD in $OLD_REVS; do
+              if [ "$OLD" != "$REVISION" ]; then
+                echo "Undeploying revision $OLD"
+                curl -s -X DELETE \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" \
+                  "https://apigee.googleapis.com/v1/organizations/${{ vars.APIGEE_ORG }}/environments/${{ vars.APIGEE_ENV }}/apis/$PROXY_DIR/revisions/$OLD/deployments"
+              fi
+            done
+          fi
+
+          # ── DEPLOY NEW REVISION ───────────────
+          echo "Deploying revision $REVISION..."
+
+          DEPLOY_RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "https://apigee.googleapis.com/v1/organizations/${{ vars.APIGEE_ORG }}/environments/${{ vars.APIGEE_ENV }}/apis/$PROXY_DIR/revisions/$REVISION/deployments?override=true")
+
+          echo "Deploy Response:"
+          echo "$DEPLOY_RESPONSE"
+
+          DEPLOY_ERROR=$(echo "$DEPLOY_RESPONSE" | jq -r '.error.message // empty')
+          if [ -n "$DEPLOY_ERROR" ]; then
+            echo "❌ Deployment failed: $DEPLOY_ERROR"
+            exit 1
+          fi
+
+          DEPLOY_STATE=$(echo "$DEPLOY_RESPONSE" | jq -r '.state // empty')
+          echo "Deployment state: $DEPLOY_STATE"
+
+          echo "🚀 Deployment successful — $PROXY_DIR (Revision $REVISION)"
